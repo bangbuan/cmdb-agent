@@ -1,0 +1,9 @@
+# Abaikan file konfigurasi lokal
+config.cfg
+
+# Abaikan file payload kustom (diisi manual oleh admin)
+more.json
+
+# Abaikan direktori git bawaan sistem operasi (opsional)
+.DS_Store
+*~

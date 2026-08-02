@@ -1,0 +1,17 @@
+# ==============================================================================
+# CMDB Agent Configuration Template
+# Salin file ini menjadi 'config.cfg' lalu sesuaikan nilainya.
+# ==============================================================================
+
+# URL endpoint Webhook/API CMDB Server (Self-Hosted)
+CMDB_SERVER_URL="https://cmdb.domain.localhost/api/v1/telemetry"
+
+# Token / API Key untuk otentikasi header
+API_KEY="SECRET_TOKEN_HERE"
+
+# Direktori lokal (di sisi client) untuk menyimpan backup konfigurasi ke Git
+GIT_REPO_DIR="/var/backups/cmdb-git-configs"
+
+# URL Remote Git Repository untuk menyimpan konfigurasi server (SSH/HTTP)
+# Pastikan server client memiliki akses ke repositori ini (misal via SSH Key)
+GIT_REMOTE_URL="git@github.com:org/server-configs.git"
