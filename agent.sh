@@ -304,14 +304,14 @@ get_ufw_rules() {
 # 5. USERS & GROUPS NON-SYSTEM (UID/GID >= 1000)
 # ------------------------------------------------------------------------------
 get_non_system_users() {
-  local users_data=""
+  local users_data="[]"
 
   while IFS=: read -r username _ uid gid _ homedir _; do
     if [ "$uid" -ge 1000 ] && [ "$uid" -ne 65534 ]; then
       local group_name
       group_name=$(getent group "$gid" | cut -d: -f1 || echo "unknown")
 
-      # 1. Hitung disk usage home directory (dengan batas waktu 5 detik)
+      # 1. Hitung disk usage home directory (dengan batas waktu)
       local home_disk_usage="0"
       if [ -d "$homedir" ]; then
         home_disk_usage=$(timeout 60s du -sb "$homedir" 2>/dev/null | awk '{print $1}' || echo "0")
@@ -326,32 +326,56 @@ get_non_system_users() {
       if [ -d "$public_html_path" ]; then
         public_html_exists="true"
         
-        # Cek apakah owner dari folder /public_html/$username adalah benar si $username
         local current_owner
         current_owner=$(stat -c '%U' "$public_html_path" 2>/dev/null || echo "")
         
         if [ "$current_owner" = "$username" ]; then
           public_html_owner_match="true"
-          # Jika folder ada dan owner sesuai, hitung disk usage-nya (batas waktu 5 detik)
           public_html_disk_usage=$(timeout 60s du -sb "$public_html_path" 2>/dev/null | awk '{print $1}' || echo "0")
         fi
       fi
 
-      # 3. Format sebagai JSON object per user
-      local json_line
-      json_line=$(printf '{"username": "%s", "uid": %d, "group": "%s", "home": "%s", "disk_usage_bytes": %s, "public_html": {"path": "%s", "exists": %s, "owner_matched": %s, "disk_usage_bytes": %s}}' \
-        "$username" "$uid" "$group_name" "$homedir" "${home_disk_usage:-0}" \
-        "$public_html_path" "$public_html_exists" "$public_html_owner_match" "${public_html_disk_usage:-0}")
-
-      if [ -z "$users_data" ]; then
-        users_data="$json_line"
-      else
-        users_data="$users_data,$json_line"
+      # 3. Ambil daftar Cronjob user tersebut (crontab -l)
+      # Menggunakan su/sudo atau crontab -u jika dijalankan sebagai root
+      local user_cron=""
+      if command -v crontab >/dev/null 2>&1; then
+        user_cron=$(crontab -l -u "$username" 2>/dev/null || echo "")
       fi
+
+      # 4. Bangun objek JSON user menggunakan jq --arg agar aman dari karakter khusus
+      local user_json
+      user_json=$(jq -n \
+        --arg uname "$username" \
+        --argjson uid "$uid" \
+        --arg group "$group_name" \
+        --arg home "$homedir" \
+        --argjson home_disk "${home_disk_usage:-0}" \
+        --arg ph_path "$public_html_path" \
+        --argjson ph_exists "$public_html_exists" \
+        --argjson ph_owner "$public_html_owner_match" \
+        --argjson ph_disk "${public_html_disk_usage:-0}" \
+        --arg cron "$user_cron" \
+        '{
+          username: $uname,
+          uid: $uid,
+          group: $group,
+          home: $home,
+          disk_usage_bytes: $home_disk,
+          public_html: {
+            path: $ph_path,
+            exists: $ph_exists,
+            owner_matched: $ph_owner,
+            disk_usage_bytes: $ph_disk
+          },
+          crontab: $cron
+        }')
+
+      # Gabungkan ke dalam array utama menggunakan jq
+      users_data=$(echo "$users_data" | jq --argjson item "$user_json" '. + [$item]')
     fi
   done < /etc/passwd
 
-  echo "[$users_data]" | jq '.'
+  echo "$users_data" | jq '.'
 }
 
 get_non_system_groups() {
@@ -431,6 +455,73 @@ sync_git_configs() {
     fi
   fi
 }
+
+# ==============================================================================
+# FUNGSI ARSIP & UPLOAD CONFIGURATION (agent.sh)
+# ==============================================================================
+sync_and_upload_configs() {
+  local temp_dir="/tmp/cmdb_config_staging"
+  local tar_file="/tmp/server_configs.tar.gz"
+
+  echo "[+] Menyiapkan direktori staging konfigurasi..."
+  rm -rf "$temp_dir"
+  mkdir -p "$temp_dir/etc"
+
+
+  local paths=(
+    "/etc/nginx"
+    "/etc/apache2"
+    "/etc/php"
+    "/etc/mysql"
+    "/etc/postgresql"
+    "/etc/firebird"
+  )
+
+  for p in "${paths[@]}"; do
+    if [ -d "$p" ]; then
+      local target_dir="$GIT_REPO_DIR/$(basename "$p")"
+      mkdir -p "$target_dir"
+      # Menggunakan rsync aman tanpa parameter --delete
+      rsync -a "$p/" "$target_dir/" 2>/dev/null || true
+    fi
+  done
+
+  # Salin file konfigurasi vital server baremetal (sesuaikan kebutuhan)
+  [ -d /etc/nginx ] && cp -r /etc/nginx "$temp_dir/etc/"
+  [ -d /etc/php ] && cp -r /etc/php "$temp_dir/etc/"
+  [ -d /etc/mysql ] && cp -r /etc/mysql "$temp_dir/etc/"
+  [ -f /etc/crontab ] && cp /etc/crontab "$temp_dir/etc/"
+
+  # Kompres menjadi tar.gz
+  echo "[+] Mengompres direktori konfigurasi..."
+  tar -czf "$tar_file" -C "$temp_dir" .
+  rm -rf "$temp_dir"
+
+  # Konfigurasi Endpoint CMDB Anda
+  local cmdb_url="https://extrepo.batam.go.id/cmdb/servers/uploadconfig.php"
+  # Pastikan API_KEY diambil dari config.cfg atau didefinisikan
+  local api_key="${API_KEY:-n36M}" 
+
+  echo "[+] Mengirimkan arsip konfigurasi ke server CMDB..."
+  local http_response
+  http_response=$(curl -s -w "\n%{http_code}" -X POST "$cmdb_url" \
+    -H "X-API-Key: $api_key" \
+    -F "config_archive=@${tar_file}")
+
+  local http_body=$(echo "$http_response" | sed '$d')
+  local http_status=$(echo "$http_response" | tail -n1)
+
+  # Bersihkan file tar lokal
+  rm -f "$tar_file"
+
+  if [ "$http_status" -eq 200 ]; then
+      echo "[SUCCESS] Berkas konfigurasi berhasil terkirim."
+  else
+      echo "[ERROR] Gagal mengirim konfigurasi (HTTP $http_status): $http_body"
+      return 1
+  fi
+}
+
 
 # ------------------------------------------------------------------------------
 # MAIN EXECUTION
