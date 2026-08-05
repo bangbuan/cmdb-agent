@@ -17,11 +17,6 @@ fi
 
 source "$CONFIG_FILE"
 
-if [ -z "${CMDB_SERVER_URL:-}" ] || [ -z "${API_KEY:-}" ] || [ -z "${GIT_REPO_DIR:-}" ]; then
-  echo "Error: Variabel CMDB_SERVER_URL, API_KEY, atau GIT_REPO_DIR wajib diisi di dalam config.cfg!" >&2
-  exit 1
-fi
-
 # ------------------------------------------------------------------------------
 # 0. AUTO UPDATE SCRIPT DARI GITHUB (Hanya via parameter --update)
 # ------------------------------------------------------------------------------
@@ -53,35 +48,54 @@ auto_update() {
 # ------------------------------------------------------------------------------
 # 1. GIT CONFIG & VM CONFIG BACKUP
 # ------------------------------------------------------------------------------
-sync_git_configs() {
-  mkdir -p "$GIT_REPO_DIR"
-  
-  if [ ! -d "$GIT_REPO_DIR/.git" ]; then
-    git -C "$GIT_REPO_DIR" init >/dev/null 2>&1
-  fi
+upload_configs() {
+  local temp_dir="/tmp/cmdb_vm_staging"
+  local tar_file="/tmp/vm_configs.tar.gz"
+  rm -rf "$temp_dir" "$tar_file"
 
-  # Backup konfigurasi libvirt XML VM ke direktori git configs
+  mkdir -p "$temp_dir/vm"
+
   if command -v virsh >/dev/null 2>&1; then
-    local vm_backup_dir="$GIT_REPO_DIR/libvirt-vms"
-    mkdir -p "$vm_backup_dir"
-    
-    # Dump XML semua VM aktif/non-aktif
     for vm in $(virsh list --all --name 2>/dev/null | grep -v '^$'); do
-      virsh dumpxml "$vm" > "$vm_backup_dir/$vm.xml" 2>/dev/null || true
+      virsh dumpxml "$vm" > "$temp_dir/vm/$vm.xml" 2>/dev/null || true
     done
   fi
 
-  # Lakukan commit otomatis ke git lokal
-  git -C "$GIT_REPO_DIR" add . >/dev/null 2>&1
-  if ! git -C "$GIT_REPO_DIR" diff-index --quiet HEAD -- 2>/dev/null; then
-    git -C "$GIT_REPO_DIR" commit -m "Auto-backup baremetal configs: $(date -u +'%Y-%m-%d %H:%M:%S UTC')" >/dev/null 2>&1
-    
-    # Push ke remote jika URL diset di config.cfg
-    if [ -n "${GIT_REMOTE_URL:-}" ]; then
-      git -C "$GIT_REPO_DIR" push origin main >/dev/null 2>&1 || true
+  local paths=(
+    "/etc/netplan"
+  )
+
+  for p in "${paths[@]}"; do
+    if [ -d "$p" ]; then
+      local target_dir="$temp_dir$p"
+      mkdir -p "$target_dir"
+      rsync -a "$p/" "$target_dir/" 2>/dev/null || true
     fi
+  done
+
+  echo "[+] Mengompres arsip XML VM..."
+  tar -czf "$tar_file" -C "$temp_dir" .
+  rm -rf "$temp_dir"
+
+    echo "[+] Mengirimkan arsip konfigurasi VM ke server CMDB..."
+  local http_response
+  http_response=$(curl -s -w "\n%{http_code}" -X POST "$CMDB_UPLOAD_URL" \
+    -H "X-API-Key: $API_KEY" \
+    -F "config_archive=@${tar_file}")
+
+  local http_body=$(echo "$http_response" | sed '$d')
+  local http_status=$(echo "$http_response" | tail -n1)
+
+  rm -f "$tar_file"
+
+  if [ "$http_status" -eq 200 ]; then
+    echo "[SUCCESS] Berkas konfigurasi VM berhasil terkirim."
+  else
+    echo "[ERROR] Gagal mengirim konfigurasi VM (HTTP $http_status): $http_body"
+    return 1
   fi
 }
+
 
 # ------------------------------------------------------------------------------
 # 2. PENGUMPULAN DATA SISTEM (OS, Updates, Hardware, Network)
@@ -251,10 +265,6 @@ main() {
     exit 0
   fi
 
-  # 1. Sinkronisasi konfigurasi ke Git
-  sync_git_configs
-
-  # 2. Kumpulkan metrics
   local data_os data_updates data_hw data_net data_vms
   data_os=$(get_os_info)
   data_updates=$(get_os_updates)
@@ -262,7 +272,6 @@ main() {
   data_net=$(get_network_info)
   data_vms=$(get_vms_info)
 
-  # 3. Rakit Payload JSON Tunggal
   local final_payload
   final_payload=$(jq -n \
     --arg host "$(hostname)" \
@@ -287,10 +296,13 @@ main() {
     }')
 
   # 4. Kirimkan Payload ke Server CMDB via HTTP POST
-  curl -s -X POST "$CMDB_SERVER_URL" \
+  curl -s -X POST "$CMDB_TELEMETRY_URL" \
     -H "Content-Type: application/json" \
     -H "X-API-Key: $API_KEY" \
     -d "$final_payload"
+
+  # 5. upload configs
+  upload_configs  
 }
 
 main "$@"

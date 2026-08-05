@@ -4,7 +4,9 @@
 # ==============================================================================
 
 # URL endpoint Webhook/API CMDB Server (Self-Hosted)
-CMDB_SERVER_URL="https://cmdb.domain.localhost/api/v1/telemetry"
+CMDB_PREFIX_URL="https://my.domain.com/cmdb/api"
+CMDB_TELEMETRY_URL="$CMDB_PREFIX_URL/telemetry.php"
+CMDB_UPLOAD_URL="$CMDB_PREFIX_URL/uploadconfig.php"
 
 # Token / API Key untuk otentikasi header
 API_KEY="SECRET_TOKEN_HERE"

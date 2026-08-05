@@ -54,7 +54,9 @@ Sangat disarankan meletakkan repositori ini di direktori seperti `/opt/` agar mu
 
 4. **Sesuaikan Konfigurasi:**
    Edit berkas `config.cfg` menggunakan editor teks (seperti `nano` atau `vim`) dan sesuaikan nilainya:
-   - `CMDB_SERVER_URL`
+   - `CMDB_PREFIX_URL`
+   - `CMDB_TELEMETRY_URL`
+   - `CMDB_UPLOAD_URL`
    - `API_KEY`
    - `GIT_REPO_DIR` (Lokasi repositori lokal untuk backup konfigurasi)
    - `GIT_REMOTE_URL` (Opsional, remote repository untuk push backup config)

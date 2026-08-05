@@ -1,5 +1,6 @@
 # Abaikan file konfigurasi lokal
 config.cfg
+test.sh
 
 # Abaikan file payload kustom (diisi manual oleh admin)
 more.json
