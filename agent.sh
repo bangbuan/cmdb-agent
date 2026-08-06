@@ -6,12 +6,8 @@
 
 set -euo pipefail
 
+# Direktori kerja agen
 SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
-HOSTNAME=$(hostname -f 2>/dev/null || hostname)
-
-# ------------------------------------------------------------------------------
-# 0. LOAD CONFIGURATION
-# ------------------------------------------------------------------------------
 CONFIG_FILE="$SCRIPT_DIR/config.cfg"
 
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -22,15 +18,7 @@ fi
 
 source "$CONFIG_FILE"
 
-if [ -z "${CMDB_SERVER_URL:-}" ] || [ -z "${API_KEY:-}" ] || [ -z "${GIT_REPO_DIR:-}" ]; then
-  echo "Error: Variabel CMDB_SERVER_URL, API_KEY, atau GIT_REPO_DIR wajib diisi di dalam config.cfg!" >&2
-  exit 1
-fi
 
-
-# ------------------------------------------------------------------------------
-# 1. AUTO UPDATE SCRIPT DARI GITHUB
-# ------------------------------------------------------------------------------
 auto_update() {
   cd "$SCRIPT_DIR" || return
 
@@ -57,7 +45,65 @@ auto_update() {
 }
 
 # ------------------------------------------------------------------------------
-# 2. PENGUMPULAN DATA SISTEM (OS, CPU, RAM, STORAGE)
+# 1. UPLOAD CONFIGS
+# ------------------------------------------------------------------------------
+upload_configs() {
+  local temp_dir="/tmp/cmdb_vm_staging"
+  local tar_file="/tmp/vm_configs.tar.gz"
+  rm -rf "$temp_dir" "$tar_file"
+
+  mkdir -p "$temp_dir/vm"
+
+  if command -v virsh >/dev/null 2>&1; then
+    for vm in $(virsh list --all --name 2>/dev/null | grep -v '^$'); do
+      virsh dumpxml "$vm" > "$temp_dir/vm/$vm.xml" 2>/dev/null || true
+    done
+  fi
+
+  local paths=(
+    "/etc/netplan"
+    "/etc/nginx"
+    "/etc/apache2"
+    "/etc/php"
+    "/etc/mysql"
+    "/etc/postgresql"
+    "/etc/firebird"
+  )
+
+  for p in "${paths[@]}"; do
+    if [ -d "$p" ]; then
+      local target_dir="$temp_dir$p"
+      mkdir -p "$target_dir"
+      rsync -a "$p/" "$target_dir/" 2>/dev/null || true
+    fi
+  done
+
+  echo "[+] Mengompres arsip XML VM..."
+  tar -czf "$tar_file" -C "$temp_dir" .
+  rm -rf "$temp_dir"
+
+    echo "[+] Mengirimkan arsip konfigurasi VM ke server CMDB..."
+  local http_response
+  http_response=$(curl -s -w "\n%{http_code}" -X POST "$CMDB_UPLOAD_URL" \
+    -H "X-API-Key: $API_KEY" \
+    -F "config_archive=@${tar_file}")
+
+  local http_body=$(echo "$http_response" | sed '$d')
+  local http_status=$(echo "$http_response" | tail -n1)
+
+  rm -f "$tar_file"
+
+  if [ "$http_status" -eq 200 ]; then
+    echo "[SUCCESS] Berkas konfigurasi VM berhasil terkirim."
+  else
+    echo "[ERROR] Gagal mengirim konfigurasi VM (HTTP $http_status): $http_body"
+    return 1
+  fi
+}
+
+
+# ------------------------------------------------------------------------------
+# 2. PENGUMPULAN DATA SISTEM (OS, Updates, Hardware, Network)
 # ------------------------------------------------------------------------------
 get_os_info() {
   local os_desc
@@ -84,13 +130,13 @@ get_os_updates() {
 
 get_hardware_info() {
   local cpu_model cpu_cores
-  cpu_model=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | sed 's/^[ \t]*//')
-  cpu_cores=$(nproc)
+  cpu_model=$(grep -m1 "model name" /proc/cpuinfo | cut -d: -f2 | sed 's/^[ \t]*//' || echo "Unknown")
+  cpu_cores=$(nproc 2>/dev/null || echo 1)
 
   local ram_total ram_free ram_available
-  ram_total=$(free -m | awk '/Mem:/ {print $2}')
-  ram_free=$(free -m | awk '/Mem:/ {print $4}')
-  ram_available=$(free -m | awk '/Mem:/ {print $7}')
+  ram_total=$(free -m | awk '/Mem:/ {print $2}' || echo 0)
+  ram_free=$(free -m | awk '/Mem:/ {print $4}' || echo 0)
+  ram_available=$(free -m | awk '/Mem:/ {print $7}' || echo 0)
 
   local storage_json
   storage_json=$(lsblk -e 7 -J -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINT 2>/dev/null || echo '{"blockdevices": []}')
@@ -113,32 +159,22 @@ get_hardware_info() {
 # 3. NETWORK INTERFACES & IP ADDRESSES (IPv4 ONLY, EXCLUDING 127.0.0.0/8)
 # ------------------------------------------------------------------------------
 get_network_info() {
-  local ip_link_json ip_addr_json
-
-  ip_link_json=$(ip -j link show 2>/dev/null || echo '[]')
-  ip_addr_json=$(ip -4 -j addr show 2>/dev/null || echo '[]')
-
-  jq -n \
-    --argjson links "$ip_link_json" \
-    --argjson addrs "$ip_addr_json" \
-    '{
-      interfaces: ($links | map({
-        interface: .ifname,
-        mac_address: (.address // "none"),
-        state: .operstate
-      })),
-      ip_addresses: ($addrs | map(
-        .ifname as $iface |
-        .addr_info[] |
-        select(.local | startswith("127.") | not) |
-        {
-          interface: $iface,
-          ip_address: .local,
-          prefix_len: .prefixlen
+  local net_json="[]"
+  if command -v ip >/dev/null 2>&1; then
+    net_json=$(ip -j addr show 2>/dev/null | jq '[
+      .[] 
+      # Filter keluar loopback (lo) dan semua interface berawalan vnet
+      | select(.ifname | test("^(lo|vnet)") | not)
+      | {
+          interface: .ifname,
+          mac: ([.addr_info[]? | select(.family == "lladdr") | .local] | first // "unknown"),
+          ipv4: [.addr_info[]? | select(.family == "inet") | .local]
         }
-      ))
-    }'
+    ]' || echo "[]")
+  fi
+  echo "$net_json"
 }
+
 
 # ------------------------------------------------------------------------------
 # 4. WEBSERVER, PHP, DATABASE & FIREWALL
@@ -413,114 +449,52 @@ get_more_data() {
   fi
 }
 
-# ------------------------------------------------------------------------------
-# 7. BACKUP KONFIGURASI KE GIT REPO (VERSI AMAN TANPA --delete)
-# ------------------------------------------------------------------------------
-sync_git_configs() {
-  if [ ! -d "$GIT_REPO_DIR/.git" ]; then
-    mkdir -p "$GIT_REPO_DIR"
-    git init "$GIT_REPO_DIR"
-    if [ -n "$GIT_REMOTE_URL" ]; then
-      git -C "$GIT_REPO_DIR" remote add origin "$GIT_REMOTE_URL" || true
-    fi
-  fi
+# # ------------------------------------------------------------------------------
+# # 7. BACKUP KONFIGURASI KE GIT REPO (VERSI AMAN TANPA --delete)
+# # ------------------------------------------------------------------------------
+# sync_git_configs() {
+#   if [ ! -d "$GIT_REPO_DIR/.git" ]; then
+#     mkdir -p "$GIT_REPO_DIR"
+#     git init "$GIT_REPO_DIR"
+#     if [ -n "$GIT_REMOTE_URL" ]; then
+#       git -C "$GIT_REPO_DIR" remote add origin "$GIT_REMOTE_URL" || true
+#     fi
+#   fi
 
-  local paths=(
-    "/etc/nginx"
-    "/etc/apache2"
-    "/etc/php"
-    "/etc/mysql"
-    "/etc/postgresql"
-    "/etc/firebird"
-  )
+#   local paths=(
+#     "/etc/nginx"
+#     "/etc/apache2"
+#     "/etc/php"
+#     "/etc/mysql"
+#     "/etc/postgresql"
+#     "/etc/firebird"
+#   )
 
-  for p in "${paths[@]}"; do
-    if [ -d "$p" ]; then
-      local target_dir="$GIT_REPO_DIR/$(basename "$p")"
-      mkdir -p "$target_dir"
-      # Menggunakan rsync aman tanpa parameter --delete
-      rsync -a "$p/" "$target_dir/" 2>/dev/null || true
-    fi
-  done
+#   for p in "${paths[@]}"; do
+#     if [ -d "$p" ]; then
+#       local target_dir="$GIT_REPO_DIR/$(basename "$p")"
+#       mkdir -p "$target_dir"
+#       # Menggunakan rsync aman tanpa parameter --delete
+#       rsync -a "$p/" "$target_dir/" 2>/dev/null || true
+#     fi
+#   done
 
-  cd "$GIT_REPO_DIR"
-  git config user.name "CMDB Agent"
-  git config user.email "cmdb-agent@$HOSTNAME"
-  git add .
+#   cd "$GIT_REPO_DIR"
+#   git config user.name "CMDB Agent"
+#   git config user.email "cmdb-agent@$HOSTNAME"
+#   git add .
 
-  if ! git diff-index --quiet HEAD -- 2>/dev/null; then
-    git commit -m "Auto-backup config from $HOSTNAME on $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-    if [ -n "$GIT_REMOTE_URL" ]; then
-      git push origin main 2>/dev/null || true
-    fi
-  fi
-}
-
-# ==============================================================================
-# FUNGSI ARSIP & UPLOAD CONFIGURATION (agent.sh)
-# ==============================================================================
-sync_and_upload_configs() {
-  local temp_dir="/tmp/cmdb_config_staging"
-  local tar_file="/tmp/server_configs.tar.gz"
-
-  echo "[+] Menyiapkan direktori staging konfigurasi..."
-  rm -rf "$temp_dir"
-  mkdir -p "$temp_dir/etc"
+#   if ! git diff-index --quiet HEAD -- 2>/dev/null; then
+#     git commit -m "Auto-backup config from $HOSTNAME on $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+#     if [ -n "$GIT_REMOTE_URL" ]; then
+#       git push origin main 2>/dev/null || true
+#     fi
+#   fi
+# }
 
 
-  local paths=(
-    "/etc/nginx"
-    "/etc/apache2"
-    "/etc/php"
-    "/etc/mysql"
-    "/etc/postgresql"
-    "/etc/firebird"
-  )
 
-  for p in "${paths[@]}"; do
-    if [ -d "$p" ]; then
-      local target_dir="$GIT_REPO_DIR/$(basename "$p")"
-      mkdir -p "$target_dir"
-      # Menggunakan rsync aman tanpa parameter --delete
-      rsync -a "$p/" "$target_dir/" 2>/dev/null || true
-    fi
-  done
 
-  # Salin file konfigurasi vital server baremetal (sesuaikan kebutuhan)
-  [ -d /etc/nginx ] && cp -r /etc/nginx "$temp_dir/etc/"
-  [ -d /etc/php ] && cp -r /etc/php "$temp_dir/etc/"
-  [ -d /etc/mysql ] && cp -r /etc/mysql "$temp_dir/etc/"
-  [ -f /etc/crontab ] && cp /etc/crontab "$temp_dir/etc/"
-
-  # Kompres menjadi tar.gz
-  echo "[+] Mengompres direktori konfigurasi..."
-  tar -czf "$tar_file" -C "$temp_dir" .
-  rm -rf "$temp_dir"
-
-  # Konfigurasi Endpoint CMDB Anda
-  local cmdb_url="https://extrepo.batam.go.id/cmdb/servers/uploadconfig.php"
-  # Pastikan API_KEY diambil dari config.cfg atau didefinisikan
-  local api_key="${API_KEY:-n36M}" 
-
-  echo "[+] Mengirimkan arsip konfigurasi ke server CMDB..."
-  local http_response
-  http_response=$(curl -s -w "\n%{http_code}" -X POST "$cmdb_url" \
-    -H "X-API-Key: $api_key" \
-    -F "config_archive=@${tar_file}")
-
-  local http_body=$(echo "$http_response" | sed '$d')
-  local http_status=$(echo "$http_response" | tail -n1)
-
-  # Bersihkan file tar lokal
-  rm -f "$tar_file"
-
-  if [ "$http_status" -eq 200 ]; then
-      echo "[SUCCESS] Berkas konfigurasi berhasil terkirim."
-  else
-      echo "[ERROR] Gagal mengirim konfigurasi (HTTP $http_status): $http_body"
-      return 1
-  fi
-}
 
 
 # ------------------------------------------------------------------------------
@@ -533,12 +507,10 @@ main() {
     exit 0
   fi
 
-  # 1. Backup konfigurasi ke Git
-  sync_git_configs
+  upload_configs
 
-  # 2. Kumpulkan semua metrics
+  # Kumpulkan semua metrics
   local data_os data_updates data_hw data_net data_web data_php data_db data_ufw data_users data_groups data_more
-
   data_os=$(get_os_info)
   data_updates=$(get_os_updates)
   data_hw=$(get_hardware_info)
@@ -589,8 +561,8 @@ main() {
       more: $more
     }')
 
-  echo $final_payload
-  exit 1
+  # echo $final_payload
+  # exit 1
   # 4. Kirimkan JSON ke Server CMDB via HTTP POST
   curl -s -X POST "$CMDB_SERVER_URL" \
     -H "Content-Type: application/json" \
