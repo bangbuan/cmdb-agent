@@ -153,18 +153,19 @@ get_network_info() {
   local net_json="[]"
   if command -v ip >/dev/null 2>&1; then
     net_json=$(ip -j addr show 2>/dev/null | jq '[
-      .[] 
-      # Filter keluar loopback (lo) dan semua interface berawalan vnet
+      .[]
       | select(.ifname | test("^(lo|vnet)") | not)
       | {
           interface: .ifname,
-          mac: ([.addr_info[]? | select(.family == "lladdr") | .local] | first // "unknown"),
+          mac: (.address // ([.addr_info[]? | select(.family == "lladdr") | .local] | first) // "unknown"),
           ipv4: [.addr_info[]? | select(.family == "inet") | .local]
         }
     ]' || echo "[]")
   fi
   echo "$net_json"
 }
+
+
 
 # ------------------------------------------------------------------------------
 # 3. PENGUMPULAN DATA VIRTUAL MACHINE (KVM/QEMU via virsh)
