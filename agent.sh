@@ -563,7 +563,7 @@ main() {
   # echo $final_payload
   # exit 1
   # 4. Kirimkan JSON ke Server CMDB via HTTP POST
-  curl -s -X POST "$CMDB_SERVER_URL" \
+  curl -s -X POST "$CMDB_TELEMETRY_URL" \
     -H "Content-Type: application/json" \
     -H "X-API-Key: $API_KEY" \
     -d "$final_payload"
