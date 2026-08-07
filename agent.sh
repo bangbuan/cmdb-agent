@@ -554,6 +554,7 @@ main() {
     --argjson groups "$data_groups" \
     --argjson more "$data_more" \
     '{
+      uuid: $uuid,
       hostname: $host,
       reported_at: $timestamp,
       os: $os,
