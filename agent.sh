@@ -104,7 +104,8 @@ upload_configs() {
 
 # ------------------------------------------------------------------------------
 # 2. PENGUMPULAN DATA SISTEM (OS, Updates, Hardware, Network)
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+
 get_os_info() {
   local os_desc
   os_desc=$(lsb_release -ds 2>/dev/null || cat /etc/os-release | grep "PRETTY_NAME" | cut -d= -f2 | tr -d '"')
@@ -508,6 +509,10 @@ main() {
 
   upload_configs
 
+
+  local data_uuid
+  data_uuid=$(cat /sys/class/dmi/id/product_uuid)
+
   # Kumpulkan semua metrics
   local data_os data_updates data_hw data_net data_web data_php data_db data_ufw data_users data_groups data_more
   data_os=$(get_os_info)
@@ -525,6 +530,7 @@ main() {
   # 3. Gabungkan seluruh data menjadi SATU JSON tunggal
   local final_payload
   final_payload=$(jq -n \
+    --arg uuid "$data_uuid" \
     --arg host "$HOSTNAME" \
     --arg timestamp "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
     --argjson os "$data_os" \
