@@ -105,6 +105,14 @@ upload_configs() {
 # ------------------------------------------------------------------------------
 # 2. PENGUMPULAN DATA SISTEM (OS, Updates, Hardware, Network)
 # -----------------------------------------------------------------------------
+get_system_uuid() {
+    local uuid_path="/sys/class/dmi/id/product_uuid"
+    if [ -f "$uuid_path" ]; then
+        cat "$uuid_path" 2>/dev/null | tr -d '[:space:]' || echo "unknown"
+    else
+        echo "unknown"
+    fi
+}
 
 get_os_info() {
   local os_desc
@@ -510,11 +518,12 @@ main() {
   upload_configs
 
 
-  local data_uuid
-  data_uuid=$(cat /sys/class/dmi/id/product_uuid)
+  local vuuid
+  vuuid=$(cat /sys/class/dmi/id/product_uuid)
 
   # Kumpulkan semua metrics
-  local data_os data_updates data_hw data_net data_web data_php data_db data_ufw data_users data_groups data_more
+  local system_uuid, data_os data_updates data_hw data_net data_web data_php data_db data_ufw data_users data_groups data_more
+  system_uuid=$(get_system_uuid)
   data_os=$(get_os_info)
   data_updates=$(get_os_updates)
   data_hw=$(get_hardware_info)
@@ -530,7 +539,7 @@ main() {
   # 3. Gabungkan seluruh data menjadi SATU JSON tunggal
   local final_payload
   final_payload=$(jq -n \
-    --arg uuid "$data_uuid" \
+    --arg uuid "$system_uuid" \
     --arg host "$HOSTNAME" \
     --arg timestamp "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
     --argjson os "$data_os" \
