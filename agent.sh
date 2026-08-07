@@ -522,7 +522,7 @@ main() {
   vuuid=$(cat /sys/class/dmi/id/product_uuid)
 
   # Kumpulkan semua metrics
-  local system_uuid, data_os data_updates data_hw data_net data_web data_php data_db data_ufw data_users data_groups data_more
+  local system_uuid data_os data_updates data_hw data_net data_web data_php data_db data_ufw data_users data_groups data_more
   system_uuid=$(get_system_uuid)
   data_os=$(get_os_info)
   data_updates=$(get_os_updates)
