@@ -147,8 +147,48 @@ get_hardware_info() {
   ram_free=$(free -m | awk '/Mem:/ {print $4}' || echo 0)
   ram_available=$(free -m | awk '/Mem:/ {print $7}' || echo 0)
 
-  local storage_json
-  storage_json=$(lsblk -e 7 -J -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINT 2>/dev/null || echo '{"blockdevices": []}')
+  # 1. Ambil data block devices dari lsblk (format JSON)
+  local lsblk_json
+  lsblk_json=$(lsblk -e 7 -J -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINT 2>/dev/null || echo '{"blockdevices": []}')
+
+  # 2. Ambil data usage filesystem dari df dalam bentuk JSON array via awk + jq
+  # Format df: target (mountpoint), size, used, avail
+  local df_json
+  df_json=$(df -B1 --output=target,size,used,avail 2>/dev/null | tail -n +2 | awk '{
+    printf "{\"mount\": \"%s\", \"size_bytes\": %s, \"used_bytes\": %s, \"free_bytes\": %s},\n", $1, $2, $3, $4
+  }' | sed '$s/,$//')
+  df_json="[${df_json}]"
+
+  # 3. Gabungkan data lsblk dan df menggunakan jq secara rekursif
+  local enriched_storage
+  enriched_storage=$(jq -n \
+    --argjson lsblk "$lsblk_json" \
+    --argjson df "$df_json" \
+    '
+    # Buat lookup map dari array df berdasarkan mountpoint
+    ($df | map({(.mount): {size_bytes: .size_bytes, used_bytes: .used_bytes, free_bytes: .free_bytes}}) | add) as $df_map
+    |
+    # Fungsi rekursif untuk menyisipkan filesystem_stats ke dalam tree lsblk (termasuk children)
+    def enrich:
+      if type == "array" then
+        map(enrich)
+      elif type == "object" then
+        . + {
+          filesystem_stats: (
+            if .mountpoint and $df_map[.mountpoint] then 
+              $df_map[.mountpoint] 
+            else 
+              null 
+            end
+          )
+        }
+        | if .children then .children |= enrich else . end
+      else
+        .
+      end;
+
+    $lsblk.blockdevices | enrich
+    ')
 
   jq -n \
     --arg cpu_m "$cpu_model" \
@@ -156,11 +196,11 @@ get_hardware_info() {
     --arg ram_t "$ram_total" \
     --arg ram_f "$ram_free" \
     --arg ram_a "$ram_available" \
-    --argjson storage "$storage_json" \
+    --argjson storage "$enriched_storage" \
     '{
       cpu: {model: $cpu_m, cores: ($cpu_c|tonumber)},
       ram_mb: {total: ($ram_t|tonumber), free: ($ram_f|tonumber), available: ($ram_a|tonumber)},
-      storage: $storage.blockdevices
+      storage: $storage
     }'
 }
 
