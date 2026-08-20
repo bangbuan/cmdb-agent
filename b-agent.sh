@@ -165,7 +165,15 @@ get_network_info() {
   echo "$net_json"
 }
 
-
+get_more_data() {
+  local more_file="$SCRIPT_DIR/more.json"
+  
+  if [ -f "$more_file" ] && jq -e . "$more_file" >/dev/null 2>&1; then
+    cat "$more_file"
+  else
+    echo "{}"
+  fi
+}
 
 # ------------------------------------------------------------------------------
 # 3. PENGUMPULAN DATA VIRTUAL MACHINE (KVM/QEMU via virsh)
@@ -265,6 +273,7 @@ main() {
   data_hw=$(get_hardware_info)
   data_net=$(get_network_info)
   data_vms=$(get_vms_info)
+  data_more=$(get_more_data)
 
   local final_payload
   final_payload=$(jq -n \
@@ -275,6 +284,7 @@ main() {
     --argjson hw "$data_hw" \
     --argjson net "$data_net" \
     --argjson vms "$data_vms" \
+    --argjson more "$data_more" \
     '{
       hostname: $host,
       reported_at: $timestamp,
@@ -286,7 +296,8 @@ main() {
       virtualization: {
         total_vms: ($vms | length),
         vms: $vms
-      }
+      },
+      more: $more
     }')
 
   # 4. Kirimkan Payload ke Server CMDB via HTTP POST

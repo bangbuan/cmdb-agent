@@ -11,9 +11,3 @@ CMDB_UPLOAD_URL="$CMDB_PREFIX_URL/uploadconfig.php"
 # Token / API Key untuk otentikasi header
 API_KEY="SECRET_TOKEN_HERE"
 
-# Direktori lokal (di sisi client) untuk menyimpan backup konfigurasi ke Git
-# GIT_REPO_DIR="/var/backups/cmdb-git-configs"
-
-# URL Remote Git Repository untuk menyimpan konfigurasi server (SSH/HTTP)
-# Pastikan server client memiliki akses ke repositori ini (misal via SSH Key)
-# GIT_REMOTE_URL="git@github.com:org/server-configs.git"
